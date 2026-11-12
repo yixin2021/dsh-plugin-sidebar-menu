@@ -277,20 +277,21 @@ window.__ModuleLoader__.load({
         params[key] === undefined ? match : String(params[key])))
     }
 
-    /** Three-row menu mark; inherits `currentColor` so the host paints it. */
-    function MenuGlyph({ size = 16 }) {
+    /**
+     * Settings navigation mark: a rail beside stacked rows, so the section reads
+     * as "the sidebar" instead of inheriting the shell's generic settings gear.
+     * Inherits `currentColor`, which the host paints for the selected state.
+     */
+    function SidebarGlyph({ size = 16 }) {
       return h('svg', {
         className: 'dsm-glyph', viewBox: '0 0 24 24', width: size, height: size,
         'aria-hidden': true, focusable: 'false',
+        fill: 'none', stroke: 'currentColor', strokeWidth: 1.8,
+        strokeLinecap: 'round', strokeLinejoin: 'round',
       },
-      h('g', { stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', fill: 'none' },
-        h('path', { d: 'M4 7h16' }),
-        h('path', { d: 'M4 12h16' }),
-        h('path', { d: 'M4 17h16' })),
-      h('g', { fill: 'currentColor' },
-        h('circle', { cx: 9, cy: 7, r: 2.1 }),
-        h('circle', { cx: 15, cy: 12, r: 2.1 }),
-        h('circle', { cx: 11, cy: 17, r: 2.1 })))
+      h('rect', { x: 3.5, y: 4.5, width: 17, height: 15, rx: 3 }),
+      h('path', { d: 'M9.5 4.5v15' }),
+      h('path', { d: 'M13 9.5h4M13 14h4' }))
     }
 
     /** One glyph per entry action. */
@@ -1182,6 +1183,13 @@ window.__ModuleLoader__.load({
         label: () => t('panel'),
         inject: injected,
       }, MenuSettingsSection))
+
+      // The shell falls back to its generic gear for an unknown section id,
+      // which made this row look like the General row.
+      ctx.slots.inject('settings.section.icon', () => ctx.slots.register({
+        name: 'settings.section.icon',
+        id: PANEL_ID,
+      }, SidebarGlyph))
 
       ctx.slots.inject('shell.overlay', () => ctx.slots.register({
         name: 'shell.overlay',
