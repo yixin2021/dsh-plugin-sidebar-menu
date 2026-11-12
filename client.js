@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
     /** How long a just-added or just-edited row keeps its highlight. */
     const HIGHLIGHT_MS = 1200
     /** Bumped whenever the startup path changes, so a stale bundle is obvious. */
-    const BUILD_TAG = 'startup-3'
+    const BUILD_TAG = 'startup-4'
     /** Self-check record key; separate from the user's saved state. */
     const DIAG_KEY = 'dsh.sidebar-menu.diag'
     /** Panel the host always keeps in the sidebar; it can never be folded away. */
@@ -442,56 +442,69 @@ window.__ModuleLoader__.load({
       // The host hands its pin callbacks to the More menu only, so the saved
       // layout is applied the first time that menu reports in. Afterwards the
       // same channel mirrors host-side pin clicks back into the preference.
-      // Two ways to reach the host's pin state: the callbacks the More menu
-      // reports once it mounts, and — earlier — the sidebar's own registration,
-      // whose inject factory closes over the same setter. The early one is what
-      // lets the saved layout apply at startup instead of after a click.
+      // The host's pin state can be reached two ways: the callbacks the More
+      // menu reports once it mounts (always live), and — earlier — the factories
+      // on the sidebar's own slot registrations. Every distinct setter is kept
+      // and written to, because a single slot only exposes its first entry
+      // through the deduped accessor while rendering may use another.
       let bridge = null
-      let earlySetter = null
+      let earlySetters = []
       let layoutApplied = false
       let bridgeReady = false
       const bridgeSource = { getSnapshot: () => bridgeReady, subscribe }
-      /** The live pin setter: the More menu wins once it has reported in. */
-      const pinSetter = () => bridge ?? earlySetter
+      let generation = 0
+      let signature = ''
+
+      /** Every setter worth writing: the live bridge first, then the early ones. */
+      const liveSetters = () => {
+        const list = []
+        if (typeof bridge === 'function') list.push(bridge)
+        for (const fn of earlySetters) {
+          if (typeof fn === 'function' && !list.includes(fn)) list.push(fn)
+        }
+        return list
+      }
       const markReady = () => {
         if (bridgeReady) return
         bridgeReady = true
         notify()
       }
-      // Panels already pushed to the host, so a later sync never re-asserts a
-      // choice the user changed through the host's own controls.
-      const applied = new Set()
       /**
-       * Push the saved layout for panels not yet handled in this page session.
+       * Push the saved layout to every setter. Writes are idempotent, so a
+       * repeated attempt costs nothing and a rebuilt host store is corrected.
        * @param ids - panel ids currently registered in the sidebar.
-       * @returns whether a setter was used.
+       * @returns whether any setter accepted the layout.
        */
       const applyLayout = (ids) => {
-        const setPinned = pinSetter()
-        if (typeof setPinned !== 'function') return false
-        // Nothing registered yet is not "applied": the retry ladder must keep
-        // trying until the sidebar actually has panels to place.
         const usable = ids.filter(id => typeof id === 'string' && id !== FIXED_PANEL_ID)
         if (usable.length === 0) return false
-        for (const id of usable) {
-          if (applied.has(id)) continue
-          applied.add(id)
-          setPinned(id, !hiddenPanels.includes(id))
+        const list = liveSetters()
+        if (list.length === 0) return false
+        for (const setPinned of list) {
+          for (const id of usable) setPinned(id, !hiddenPanels.includes(id))
         }
         layoutApplied = true
         markReady()
         return true
       }
+      /** Show or hide one panel through every known setter. */
+      const pushPanel = (id, visible) => {
+        for (const setPinned of liveSetters()) setPinned(id, visible)
+      }
 
       /**
-       * Adopt the sidebar's own pin setter, which the host exposes through its
-       * `sidebar` slot registration. Guarded by the caller: a future host shape
-       * change must leave the More-menu path working.
-       * @param setPinned - the host's pin setter.
+       * Record the setters read from the sidebar's registrations.
+       * @param setters - every distinct setter found.
+       * @param signatureNow - diagnostic shape string.
        */
-      const adoptEarly = (setPinned) => {
-        if (typeof setPinned !== 'function' || earlySetter !== null || bridge !== null) return
-        earlySetter = setPinned
+      const adoptEarly = (setters, signatureNow) => {
+        const next = Array.isArray(setters) ? setters.filter(fn => typeof fn === 'function') : []
+        if (next.length === 0) return
+        earlySetters = next
+        if (signatureNow !== signature) {
+          signature = signatureNow
+          generation += 1
+        }
       }
 
       /**
@@ -504,24 +517,18 @@ window.__ModuleLoader__.load({
         const first = bridge === null
         bridge = onPinnedChange
         markReady()
-        if (first) {
-          // Whoever applies first owns the layout; the other path only mirrors.
-          if (!layoutApplied) {
-            for (const entry of entries) {
-              if (typeof entry.id !== 'string' || entry.id === FIXED_PANEL_ID) continue
-              applied.add(entry.id)
-              const want = !hiddenPanels.includes(entry.id)
-              if (entry.pinned !== want) onPinnedChange(entry.id, want)
-            }
-            layoutApplied = true
-          }
-          return
-        }
+        const ids = Array.isArray(entries)
+          ? entries.map(entry => entry?.id).filter(id => typeof id === 'string')
+          : []
+        // The layout is pushed before mirroring: otherwise the host's default
+        // (everything pinned) would overwrite the saved choice on first mount.
+        applyLayout(ids)
+        if (first) return
         // Mirror the host's own pin controls into the saved preference.
         const next = [...hiddenPanels]
         let changed = false
         for (const entry of entries) {
-          if (typeof entry.id !== 'string') continue
+          if (typeof entry?.id !== 'string') continue
           const wanted = !entry.pinned
           const listed = next.includes(entry.id)
           if (wanted === listed) continue
@@ -541,6 +548,8 @@ window.__ModuleLoader__.load({
         adoptBridge,
         adoptEarly,
         applyLayout,
+        /** How many distinct setter sets the host has published. */
+        generation: () => generation,
         /** Whether the saved layout has been pushed for this page session. */
         layoutDone: () => layoutApplied,
         /** @returns the new row id, so the page can reveal and highlight it. */
@@ -567,8 +576,7 @@ window.__ModuleLoader__.load({
             ? hiddenPanels.filter(candidate => candidate !== id)
             : (hiddenPanels.includes(id) ? hiddenPanels : [...hiddenPanels, id])
           commit(items, next)
-          const setPinned = pinSetter()
-          if (typeof setPinned === 'function') setPinned(id, visible)
+          pushPanel(id, visible)
         },
         /**
          * Drop one entry onto another, the way the More menu's drag gesture
@@ -610,8 +618,7 @@ window.__ModuleLoader__.load({
           const restore = hiddenPanels
           commit(makeDefaults(), [])
           // Re-pin what the reset just made visible, so the sidebar matches.
-          const setPinned = pinSetter()
-          if (typeof setPinned === 'function') for (const id of restore) setPinned(id, true)
+          for (const id of restore) pushPanel(id, true)
         },
         /** Report why an entry did nothing; the overlay toast shows it. */
         setNotice: (name) => {
@@ -627,43 +634,57 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Read the host sidebar's pin setter.
+     * Read every pin setter the host sidebar has published.
      *
      * `apply()` of the sidebar package builds its injected props — including
-     * `setPinned` — from a factory stored on its `sidebar` slot registration.
-     * Calling that factory is the only way to reach the setter before the More
-     * menu mounts. The stored shape differs between releases (the factory sits
-     * either on the entry or in its `options`), so both are tried, and every
-     * access is guarded: an absent or reshaped registration simply returns
-     * undefined and the plugin falls back to the More-menu bridge.
+     * `setPinned` — from a factory stored on its `sidebar` slot registration,
+     * and calling that factory is the only way to reach the setter before the
+     * More menu mounts. A single slot keeps only its first entry through the
+     * deduped accessor, so the raw entry list is used and *every* candidate
+     * setter is collected: when the host has registered more than once, the
+     * entry that wins rendering is not necessarily the first one, and writing
+     * only to the first would update a store nobody renders.
+     *
+     * Every access is guarded: an absent or reshaped registration yields no
+     * setters and the plugin falls back to the More-menu bridge.
      * @param ctx - client root context.
-     * @returns the host's pin setter, and where it was found.
+     * @returns setters (deduplicated) and a shape report for diagnostics.
      */
-    function readSidebarPinSetter(ctx) {
-      const report = { entries: 0, from: 'none', setter: undefined }
-      const entries = typeof ctx.slots.entriesOfSlot === 'function'
-        ? ctx.slots.entriesOfSlot('sidebar')
-        : []
-      if (!Array.isArray(entries)) return report
+    function readSidebarPinSetters(ctx) {
+      const report = { entries: 0, from: [] }
+      let entries = []
+      try {
+        if (typeof ctx.slots.entries === 'function') entries = ctx.slots.entries('sidebar')
+      } catch {
+        entries = []
+      }
+      if (!Array.isArray(entries) || entries.length === 0) {
+        try {
+          entries = ctx.slots.entriesOfSlot('sidebar')
+        } catch {
+          entries = []
+        }
+      }
+      if (!Array.isArray(entries)) return { entries: 0, from: [], setters: [] }
       report.entries = entries.length
+      const found = []
       for (const entry of entries) {
-        for (const from of ['entry', 'options']) {
-          const factory = from === 'entry' ? entry?.inject : entry?.options?.inject
+        if (entry === null || typeof entry !== 'object') continue
+        for (const where of ['entry', 'options']) {
+          const factory = where === 'entry' ? entry.inject : entry.options?.inject
           if (typeof factory !== 'function') continue
+          if (report.from.length < 8) report.from.push(where)
           let injected
           try {
             injected = factory()
           } catch {
             continue
           }
-          if (typeof injected?.setPinned === 'function') {
-            report.from = from
-            report.setter = injected.setPinned
-            return report
-          }
+          const setPinned = injected?.setPinned
+          if (typeof setPinned === 'function' && !found.includes(setPinned)) found.push(setPinned)
         }
       }
-      return report
+      return { entries: report.entries, from: report.from, setters: found }
     }
 
     /** Resolve a registered panel label without depending on the slots package. */
@@ -1290,30 +1311,28 @@ window.__ModuleLoader__.load({
 
       ctx.effect(installStyles, 'dsh-plugin-sidebar-menu: styles')
 
-      // Apply the saved layout as soon as the sidebar exists. The host hands
-      // its pin setter to the More menu only when that menu mounts, so without
-      // this the layout waited for a click after every restart. The sidebar's
-      // own registration closes over the same setter; reading it here is
-      // guarded, and the More-menu path stays the fallback.
-      // Applying the layout cannot rely on one moment: the sidebar's occupant
-      // registers on its own schedule, and the panels arrive after it. So the
-      // attempt is idempotent and re-runs on every panel change plus a short
-      // bounded retry ladder, stopping as soon as the layout is in force.
+      // Applying the layout cannot rely on one moment. The sidebar's occupant
+      // registers on its own schedule, a single slot only exposes its first
+      // entry through the deduped accessor, and the host may rebuild its pin
+      // store. So the attempt is idempotent, re-reads every candidate setter,
+      // re-runs on slot and panel changes, and keeps a bounded watchdog for the
+      // first seconds after mount.
       let settleTimer
+      let attempts = 0
       const attempt = () => {
+        attempts += 1
         try {
-          if (store.bridgeReady.getSnapshot() && store.layoutDone()) return
-          if (!store.bridgeReady.getSnapshot()) {
-            const report = readSidebarPinSetter(ctx)
-            if (report.setter !== undefined) store.adoptEarly(report.setter)
-            diag.sidebarEntries = report.entries
-            diag.setterFrom = report.from
-          }
           panels.refresh()
+          const report = readSidebarPinSetters(ctx)
+          diag.sidebarEntries = report.entries
+          diag.setters = report.setters.length
+          diag.setterFrom = report.from.join(',')
+          store.adoptEarly(report.setters, `${report.entries}:${report.setters.length}`)
           const ids = panels.getSnapshot().panels.map(panel => panel.id)
           diag.panels = ids.length
+          diag.attempts = attempts
+          diag.generation = store.generation()
           if (store.applyLayout(ids)) diag.appliedAt = Date.now()
-          else diag.appliedAt = diag.appliedAt ?? null
           diag.done = store.layoutDone()
         } catch (error) {
           diag.error = String(error && error.message ? error.message : error)
@@ -1322,16 +1341,26 @@ window.__ModuleLoader__.load({
         writeDiag()
       }
       ctx.effect(() => {
-        const ladder = [0, 60, 200, 600, 1500]
+        // Re-apply whenever the host publishes or rebuilds its sidebar entry.
+        let offSlots
+        try {
+          offSlots = ctx.on('slots/changed', (key) => {
+            if (typeof key === 'string' && (key === 'sidebar' || key.startsWith('sidebar.'))) attempt()
+          })
+        } catch {
+          /* no event bridge: the watchdog still covers startup */
+        }
+        const ladder = [0, 60, 200, 600, 1500, 3000, 6000, 12000]
         let step = 0
         const tick = () => {
-          if (store.layoutDone() || step >= ladder.length) return
           attempt()
-          settleTimer = window.setTimeout(tick, ladder[step++] ?? 1500)
+          if (step >= ladder.length) return
+          settleTimer = window.setTimeout(tick, ladder[step++])
         }
         tick()
         return () => {
           if (settleTimer !== undefined) window.clearTimeout(settleTimer)
+          if (typeof offSlots === 'function') offSlots()
         }
       }, 'dsh-plugin-sidebar-menu: apply saved layout')
 
