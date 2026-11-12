@@ -74,7 +74,7 @@ window.__ModuleLoader__.load({
       emptyHint: 'Add a shortcut, then open More in the left sidebar to use it.',
       reset: 'Restore defaults',
       resetConfirm: 'Restore defaults?',
-      hint: 'Entries are saved in this app and restored after a restart. Hidden entries stay in the list so you can bring them back. DSH\u2019s own panel entries keep their built-in pin controls.',
+      hint: 'Drag a row in the More menu onto another to reorder it, or use the arrows here. Entries are saved in this app and restored after a restart; hidden entries stay in the list so you can bring them back. DSH\u2019s own panel entries keep their built-in pin controls.',
       missingPanel: 'This panel is not available right now.',
       unavailableTarget: '{name} (unavailable)',
       errName: 'Enter a name.',
@@ -132,7 +132,7 @@ window.__ModuleLoader__.load({
       emptyHint: '添加常用入口后，可从左侧边栏「更多」菜单打开。',
       reset: '恢复默认',
       resetConfirm: '恢复默认？',
-      hint: '菜单项保存在本机，重启后仍然有效。隐藏的菜单项仍保留在列表中，可随时恢复。DSH 自带面板入口的显示与隐藏仍由「更多」菜单的原生固定功能管理。',
+      hint: '在「更多」菜单里按住一行拖到另一行上即可排序，也可以在这里用箭头调整。菜单项保存在本机，重启后仍然有效；隐藏的菜单项仍保留在列表中，可随时恢复。DSH 自带面板入口的显示与隐藏仍由「更多」菜单的原生固定功能管理。',
       missingPanel: '该面板当前不可用。',
       unavailableTarget: '{name}（不可用）',
       errName: '请输入名称。',
@@ -247,6 +247,14 @@ window.__ModuleLoader__.load({
       .dsm-menuIcon{flex:none;display:inline-flex;align-items:center;color:var(--dsw-alias-menu-icon)}
       .dsm-menuLabel{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:start}
       .dsm-menuTrail{flex:none;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
+      .dsm-menuRow[draggable=true]{cursor:grab}
+      .dsm-menuRow[draggable=true]:active{cursor:grabbing}
+      .dsm-menuRow[data-dragging=true]{opacity:.45}
+      .dsm-menuRow[data-drop=before]{box-shadow:inset 0 2px 0 var(--dsw-alias-state-business-primary)}
+      .dsm-menuRow[data-drop=after]{box-shadow:inset 0 -2px 0 var(--dsw-alias-state-business-primary)}
+      .dsm-grip{flex:none;display:inline-flex;align-items:center;
+        color:var(--dsw-alias-label-tertiary);opacity:.5}
+      .dsm-menuRow:hover .dsm-grip,.dsm-menuRow:focus-visible .dsm-grip{opacity:1}
       /* shell.overlay is a click-through layer; the toast opts back in. */
       .dsm-toastLayer{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);
         display:flex;align-items:center;gap:10px;max-width:min(560px,calc(100vw - 48px));
@@ -500,6 +508,28 @@ window.__ModuleLoader__.load({
             : (hiddenPanels.includes(id) ? hiddenPanels : [...hiddenPanels, id])
           commit(items, next)
           if (bridge !== null) bridge(id, visible)
+        },
+        /**
+         * Drop one entry onto another, the way the More menu's drag gesture
+         * reports it. Hidden rows keep their absolute slots, so dragging never
+         * disturbs a folded-away entry.
+         * @param fromId - dragged entry.
+         * @param toId - entry the pointer dropped on.
+         * @param edge - whether the dragged row lands before or after the target.
+         */
+        moveTo: (fromId, toId, edge) => {
+          const visible = items.filter(item => !item.hidden)
+          const from = visible.findIndex(item => item.id === fromId)
+          if (from < 0 || fromId === toId) return
+          const reordered = [...visible]
+          const filtered = items  // keep the full list untouched until the splices succeed
+          const [held] = reordered.splice(from, 1)
+          if (held === undefined || !filtered.some(item => item.id === toId)) return
+          const target = reordered.findIndex(item => item.id === toId)
+          if (target < 0) return
+          reordered.splice(edge === 'after' ? target + 1 : target, 0, held)
+          let cursor = 0
+          commit(items.map(item => (item.hidden ? item : reordered[cursor++])))
         },
         /** Move past the nearest visible neighbour, so hidden rows never swallow a step. */
         move: (id, delta) => {
@@ -966,13 +996,26 @@ window.__ModuleLoader__.load({
           h('p', { className: 'dsm-hint' }, t('hint')))
     }
 
+    /** Six-dot grip: the affordance that says "drag me". */
+    function GripGlyph({ size = 12 }) {
+      return h('svg', {
+        className: 'dsm-glyph', viewBox: '0 0 12 20', width: size, height: size * 20 / 12,
+        'aria-hidden': true, focusable: 'false',
+      }, h('g', { fill: 'currentColor' },
+        h('circle', { cx: 4, cy: 5, r: 1.3 }), h('circle', { cx: 8, cy: 5, r: 1.3 }),
+        h('circle', { cx: 4, cy: 10, r: 1.3 }), h('circle', { cx: 8, cy: 10, r: 1.3 }),
+        h('circle', { cx: 4, cy: 15, r: 1.3 }), h('circle', { cx: 8, cy: 15, r: 1.3 })))
+    }
+
     /**
-     * Shortcut rows for the left sidebar's More menu. `aria-disabled` (not the
-     * native attribute) keeps an unavailable row focusable, so keyboard and
+     * Shortcut rows for the left sidebar's More menu. Rows drag onto each other
+     * to reorder: a native drag never fires the click that would run the entry,
+     * so the same button keeps both gestures. `aria-disabled` (not the native
+     * attribute) keeps an unavailable row focusable, so keyboard and
      * screen-reader users still reach the reason.
      */
     function SidebarMenuRows(props) {
-      const { t, useMenuItems, usePanels, runMenuItem, onDismiss, adoptBridge, entries, onPinnedChange } = props
+      const { t, useMenuItems, usePanels, runMenuItem, onDismiss, adoptBridge, entries, onPinnedChange, actions } = props
       const items = useMenuItems(list => list)
       const panelSource = usePanels(source => source)
       // The host only offers its pin callbacks here, so this is where the saved
@@ -980,6 +1023,10 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         adoptBridge(entries, onPinnedChange)
       }, [entries, onPinnedChange, adoptBridge])
+      const [drag, setDrag] = React.useState(null)
+      // A drag can end on top of the source row, where some engines still fire a
+      // click; swallow exactly one after a real move so the entry does not run.
+      const moved = React.useRef(false)
       const visible = items.filter(item => !item.hidden)
       const close = () => {
         if (typeof onDismiss === 'function') onDismiss()
@@ -989,20 +1036,57 @@ window.__ModuleLoader__.load({
       const missing = (item) => !panelSource.failed && item.kind === 'panel'
         && !panelSource.panels.some(panel => panel.id === item.target)
       if (visible.length === 0) return null
-      const children = visible.map(item => h('button', {
-        key: item.id, type: 'button', role: 'menuitem', className: 'dsm-menuRow',
-        'aria-disabled': missing(item),
-        'aria-label': missing(item) ? labelOf(item, t) + ' · ' + t('unavailableShort') : undefined,
-        title: missing(item) ? t('missingPanel') : undefined,
-        onClick: () => {
-          if (missing(item)) return
-          close()
-          runMenuItem(item)
+      const canDrag = visible.length > 1
+      const children = visible.map(item => {
+        const dragging = drag !== null && drag.id === item.id
+        const edge = drag !== null && drag.overId === item.id && drag.id !== item.id ? drag.edge : null
+        return h('button', {
+          key: item.id, type: 'button', role: 'menuitem', className: 'dsm-menuRow',
+          'aria-disabled': missing(item),
+          'aria-label': missing(item) ? labelOf(item, t) + ' \u00b7 ' + t('unavailableShort') : undefined,
+          title: missing(item) ? t('missingPanel') : undefined,
+          draggable: canDrag,
+          'data-dragging': dragging,
+          'data-drop': edge ?? undefined,
+          onDragStart: (event) => {
+            moved.current = false
+            if (typeof event.dataTransfer?.setData === 'function') {
+              event.dataTransfer.effectAllowed = 'move'
+              event.dataTransfer.setData('text/plain', item.id)
+            }
+            setDrag({ id: item.id, overId: null, edge: null })
+          },
+          onDragOver: (event) => {
+            if (!canDrag || drag === null || drag.id === item.id) return
+            event.preventDefault()
+            if (event.dataTransfer !== undefined) event.dataTransfer.dropEffect = 'move'
+            const rect = event.currentTarget.getBoundingClientRect()
+            const next = event.clientY - rect.top < rect.height / 2 ? 'before' : 'after'
+            if (drag.overId !== item.id || drag.edge !== next) {
+              setDrag({ id: drag.id, overId: item.id, edge: next })
+            }
+          },
+          onDrop: (event) => {
+            event.preventDefault()
+            const from = drag?.id
+            setDrag(null)
+            if (from === undefined || from === item.id) return
+            moved.current = true
+            actions.moveTo(from, item.id, drag.edge ?? 'before')
+          },
+          onDragEnd: () => { setDrag(null) },
+          onClick: () => {
+            if (moved.current) { moved.current = false; return }
+            if (missing(item)) return
+            close()
+            runMenuItem(item)
+          },
         },
-      },
-      h('span', { className: 'dsm-menuIcon', 'aria-hidden': true }, h(KindGlyph, { kind: item.kind })),
-      h('span', { className: 'dsm-menuLabel' }, labelOf(item, t)),
-      missing(item) && h('span', { className: 'dsm-menuTrail' }, t('unavailableShort'))))
+        h('span', { className: 'dsm-menuIcon', 'aria-hidden': true }, h(KindGlyph, { kind: item.kind })),
+        h('span', { className: 'dsm-menuLabel' }, labelOf(item, t)),
+        missing(item) && h('span', { className: 'dsm-menuTrail' }, t('unavailableShort')),
+        canDrag && h('span', { className: 'dsm-grip', 'aria-hidden': true }, h(GripGlyph)))
+      })
       return h(React.Fragment, null, children)
     }
 
@@ -1073,6 +1157,7 @@ window.__ModuleLoader__.load({
           setHidden: store.setHidden,
           setPanelHidden: store.setPanelHidden,
           move: store.move,
+          moveTo: store.moveTo,
           reset: store.reset,
         },
         adoptBridge: store.adoptBridge,
