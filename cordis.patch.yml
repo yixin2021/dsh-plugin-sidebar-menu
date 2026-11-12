@@ -1,0 +1,3 @@
+- insert:
+    - id: sidebar-menu
+      name: 'dsh-plugin-sidebar-menu'

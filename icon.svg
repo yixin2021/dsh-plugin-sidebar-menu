@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 36" width="36" height="36" role="img" aria-label="Sidebar menu">
+  <g fill="#4f8ef7">
+    <rect x="13" y="8.4" width="15" height="3.4" rx="1.7"/>
+    <rect x="13" y="16.3" width="15" height="3.4" rx="1.7"/>
+    <rect x="13" y="24.2" width="15" height="3.4" rx="1.7"/>
+  </g>
+  <g fill="#3b6fd4">
+    <circle cx="8.2" cy="10.1" r="1.9"/>
+    <circle cx="8.2" cy="18" r="1.9"/>
+    <circle cx="8.2" cy="25.9" r="1.9"/>
+  </g>
+</svg>
