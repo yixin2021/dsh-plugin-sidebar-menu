@@ -22,6 +22,10 @@ window.__ModuleLoader__.load({
     const KINDS = ['panel', 'session', 'conversation', 'link']
     /** How long a just-added or just-edited row keeps its highlight. */
     const HIGHLIGHT_MS = 1200
+    /** Bumped whenever the startup path changes, so a stale bundle is obvious. */
+    const BUILD_TAG = 'startup-3'
+    /** Self-check record key; separate from the user's saved state. */
+    const DIAG_KEY = 'dsh.sidebar-menu.diag'
     /** Panel the host always keeps in the sidebar; it can never be folded away. */
     const FIXED_PANEL_ID = 'plugins'
 
@@ -465,12 +469,16 @@ window.__ModuleLoader__.load({
       const applyLayout = (ids) => {
         const setPinned = pinSetter()
         if (typeof setPinned !== 'function') return false
-        layoutApplied = true
-        for (const id of ids) {
-          if (typeof id !== 'string' || id === FIXED_PANEL_ID || applied.has(id)) continue
+        // Nothing registered yet is not "applied": the retry ladder must keep
+        // trying until the sidebar actually has panels to place.
+        const usable = ids.filter(id => typeof id === 'string' && id !== FIXED_PANEL_ID)
+        if (usable.length === 0) return false
+        for (const id of usable) {
+          if (applied.has(id)) continue
           applied.add(id)
           setPinned(id, !hiddenPanels.includes(id))
         }
+        layoutApplied = true
         markReady()
         return true
       }
@@ -533,6 +541,8 @@ window.__ModuleLoader__.load({
         adoptBridge,
         adoptEarly,
         applyLayout,
+        /** Whether the saved layout has been pushed for this page session. */
+        layoutDone: () => layoutApplied,
         /** @returns the new row id, so the page can reveal and highlight it. */
         add: (draft) => {
           const created = 'item-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7)
@@ -622,29 +632,38 @@ window.__ModuleLoader__.load({
      * `apply()` of the sidebar package builds its injected props — including
      * `setPinned` — from a factory stored on its `sidebar` slot registration.
      * Calling that factory is the only way to reach the setter before the More
-     * menu mounts. Everything about it is treated as optional: an absent or
-     * reshaped registration simply returns undefined and the plugin falls back
-     * to the More-menu bridge.
+     * menu mounts. The stored shape differs between releases (the factory sits
+     * either on the entry or in its `options`), so both are tried, and every
+     * access is guarded: an absent or reshaped registration simply returns
+     * undefined and the plugin falls back to the More-menu bridge.
      * @param ctx - client root context.
-     * @returns the host's pin setter, or undefined.
+     * @returns the host's pin setter, and where it was found.
      */
     function readSidebarPinSetter(ctx) {
+      const report = { entries: 0, from: 'none', setter: undefined }
       const entries = typeof ctx.slots.entriesOfSlot === 'function'
         ? ctx.slots.entriesOfSlot('sidebar')
         : []
-      for (const entry of Array.isArray(entries) ? entries : []) {
-        const factory = entry?.options?.inject
-        if (typeof factory !== 'function') continue
-        let injected
-        try {
-          injected = factory()
-        } catch {
-          continue
+      if (!Array.isArray(entries)) return report
+      report.entries = entries.length
+      for (const entry of entries) {
+        for (const from of ['entry', 'options']) {
+          const factory = from === 'entry' ? entry?.inject : entry?.options?.inject
+          if (typeof factory !== 'function') continue
+          let injected
+          try {
+            injected = factory()
+          } catch {
+            continue
+          }
+          if (typeof injected?.setPinned === 'function') {
+            report.from = from
+            report.setter = injected.setPinned
+            return report
+          }
         }
-        const setPinned = injected?.setPinned
-        if (typeof setPinned === 'function') return setPinned
       }
-      return undefined
+      return report
     }
 
     /** Resolve a registered panel label without depending on the slots package. */
@@ -725,6 +744,8 @@ window.__ModuleLoader__.load({
           listeners.add(listener)
           return () => { listeners.delete(listener) }
         },
+        /** Force a re-read; the retry ladder cannot rely on the subscription alone. */
+        refresh: sync,
       }
     }
 
@@ -1222,6 +1243,19 @@ window.__ModuleLoader__.load({
       }
       const t = (key, params) => interpolate(bound(key), params)
 
+      // Startup self-check. Written once per page load under its own key so a
+      // stale client bundle (no record at all) is distinguishable from a host
+      // that no longer exposes the sidebar hook (record with setterFrom none).
+      const diag = { build: BUILD_TAG, at: Date.now() }
+      const writeDiag = () => {
+        try {
+          window.localStorage.setItem(DIAG_KEY, JSON.stringify(diag))
+        } catch {
+          /* diagnostics are best-effort */
+        }
+      }
+
+      writeDiag()
       const store = createStore(() => makeDefaults(t))
       const panels = createPanelSource(ctx)
       const injected = () => ({
@@ -1261,27 +1295,54 @@ window.__ModuleLoader__.load({
       // this the layout waited for a click after every restart. The sidebar's
       // own registration closes over the same setter; reading it here is
       // guarded, and the More-menu path stays the fallback.
-      ctx.slots.inject('sidebar', () => {
-        const sync = () => {
-          try {
-            // Once the More menu has reported in it owns the live state; the
-            // early setter is only needed until then.
-            if (!store.bridgeReady.getSnapshot()) {
-              const setter = readSidebarPinSetter(ctx)
-              if (setter !== undefined) store.adoptEarly(setter)
-            }
-            store.applyLayout(panels.getSnapshot().panels.map(panel => panel.id))
-          } catch (error) {
-            console.warn('[sidebar-menu] could not apply the saved layout at startup', error)
+      // Applying the layout cannot rely on one moment: the sidebar's occupant
+      // registers on its own schedule, and the panels arrive after it. So the
+      // attempt is idempotent and re-runs on every panel change plus a short
+      // bounded retry ladder, stopping as soon as the layout is in force.
+      let settleTimer
+      const attempt = () => {
+        try {
+          if (store.bridgeReady.getSnapshot() && store.layoutDone()) return
+          if (!store.bridgeReady.getSnapshot()) {
+            const report = readSidebarPinSetter(ctx)
+            if (report.setter !== undefined) store.adoptEarly(report.setter)
+            diag.sidebarEntries = report.entries
+            diag.setterFrom = report.from
           }
+          panels.refresh()
+          const ids = panels.getSnapshot().panels.map(panel => panel.id)
+          diag.panels = ids.length
+          if (store.applyLayout(ids)) diag.appliedAt = Date.now()
+          else diag.appliedAt = diag.appliedAt ?? null
+          diag.done = store.layoutDone()
+        } catch (error) {
+          diag.error = String(error && error.message ? error.message : error)
+          console.warn('[sidebar-menu] could not apply the saved layout at startup', error)
         }
-        sync()
+        writeDiag()
+      }
+      ctx.effect(() => {
+        const ladder = [0, 60, 200, 600, 1500]
+        let step = 0
+        const tick = () => {
+          if (store.layoutDone() || step >= ladder.length) return
+          attempt()
+          settleTimer = window.setTimeout(tick, ladder[step++] ?? 1500)
+        }
+        tick()
+        return () => {
+          if (settleTimer !== undefined) window.clearTimeout(settleTimer)
+        }
+      }, 'dsh-plugin-sidebar-menu: apply saved layout')
+
+      ctx.slots.inject('sidebar', () => {
         let offPanels
         try {
-          offPanels = panels.subscribe(sync)
+          offPanels = panels.subscribe(attempt)
         } catch (error) {
           console.warn('[sidebar-menu] could not watch the panel list', error)
         }
+        attempt()
         return () => { if (typeof offPanels === 'function') offPanels() }
       })
 
