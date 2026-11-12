@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Sidebar menu",
-    "description": "Control the left sidebar from Settings → \"Sidebar menu\". Show or fold away the built-in panels (Plugins, Plugin market, Tasks, and any other panel you installed) and keep your own shortcut entries in the sidebar's More menu. Folding a panel only moves it into More: nothing is deleted, and the Plugins panel always stays in the sidebar. DSH keeps panel placement for the current page session only, so the saved layout is re-applied the first time you open the sidebar's More menu after a reload or restart — until then the sidebar shows every panel. Shortcut entries and panel choices are stored in this app and survive a restart.",
+    "description": "Control the left sidebar from Settings → \"Sidebar menu\". Show or fold away the built-in panels (Plugins, Plugin market, Tasks, and any other panel you installed) and keep your own shortcut entries in the sidebar's More menu, which you can reorder by dragging. Folding a panel only moves it into More: nothing is deleted, and the Plugins panel always stays in the sidebar. Your saved layout is re-applied automatically each time the app starts. Shortcut entries and panel choices are stored in this app and survive a restart.",
     "detail": "docs/DETAIL.md"
   }
 }

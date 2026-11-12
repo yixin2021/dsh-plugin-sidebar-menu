@@ -42,7 +42,7 @@ window.__ModuleLoader__.load({
       defaultGroup: 'Default sidebar panels',
       customGroup: 'Shortcut entries',
       defaultActive: 'Choices apply to the sidebar immediately.',
-      defaultPending: 'The sidebar has not connected in this session yet. Open its More menu once and these choices apply automatically.',
+      defaultPending: 'This DSH build does not expose the sidebar\u2019s layout hook to plugins. Open the sidebar\u2019s More menu once and these choices apply.',
       fixedPanel: 'Always shown',
       stateSidebar: 'Shown in the sidebar',
       stateMore: 'Folded into More',
@@ -100,7 +100,7 @@ window.__ModuleLoader__.load({
       defaultGroup: '默认侧边栏面板',
       customGroup: '自定义快捷入口',
       defaultActive: '选择已立即应用到侧边栏。',
-      defaultPending: '本次会话中侧边栏尚未连接：打开一次「更多」菜单后会自动应用这些选择。',
+      defaultPending: '当前 DSH 版本没有向插件开放侧边栏布局接口。打开一次侧边栏「更多」菜单后，这些选择会自动生效。',
       fixedPanel: '固定显示',
       stateSidebar: '显示在侧边栏',
       stateMore: '已收进「更多」菜单',
@@ -438,12 +438,56 @@ window.__ModuleLoader__.load({
       // The host hands its pin callbacks to the More menu only, so the saved
       // layout is applied the first time that menu reports in. Afterwards the
       // same channel mirrors host-side pin clicks back into the preference.
+      // Two ways to reach the host's pin state: the callbacks the More menu
+      // reports once it mounts, and — earlier — the sidebar's own registration,
+      // whose inject factory closes over the same setter. The early one is what
+      // lets the saved layout apply at startup instead of after a click.
       let bridge = null
+      let earlySetter = null
+      let layoutApplied = false
       let bridgeReady = false
       const bridgeSource = { getSnapshot: () => bridgeReady, subscribe }
+      /** The live pin setter: the More menu wins once it has reported in. */
+      const pinSetter = () => bridge ?? earlySetter
+      const markReady = () => {
+        if (bridgeReady) return
+        bridgeReady = true
+        notify()
+      }
+      // Panels already pushed to the host, so a later sync never re-asserts a
+      // choice the user changed through the host's own controls.
+      const applied = new Set()
+      /**
+       * Push the saved layout for panels not yet handled in this page session.
+       * @param ids - panel ids currently registered in the sidebar.
+       * @returns whether a setter was used.
+       */
+      const applyLayout = (ids) => {
+        const setPinned = pinSetter()
+        if (typeof setPinned !== 'function') return false
+        layoutApplied = true
+        for (const id of ids) {
+          if (typeof id !== 'string' || id === FIXED_PANEL_ID || applied.has(id)) continue
+          applied.add(id)
+          setPinned(id, !hiddenPanels.includes(id))
+        }
+        markReady()
+        return true
+      }
 
       /**
-       * Adopt the sidebar's pin callbacks.
+       * Adopt the sidebar's own pin setter, which the host exposes through its
+       * `sidebar` slot registration. Guarded by the caller: a future host shape
+       * change must leave the More-menu path working.
+       * @param setPinned - the host's pin setter.
+       */
+      const adoptEarly = (setPinned) => {
+        if (typeof setPinned !== 'function' || earlySetter !== null || bridge !== null) return
+        earlySetter = setPinned
+      }
+
+      /**
+       * Adopt the pin callbacks the More menu reports.
        * @param entries - the host's panel entries (id, label, pinned, active).
        * @param onPinnedChange - host callback that pins or unpins one panel.
        */
@@ -451,14 +495,17 @@ window.__ModuleLoader__.load({
         if (typeof onPinnedChange !== 'function') return
         const first = bridge === null
         bridge = onPinnedChange
-        if (!bridgeReady) {
-          bridgeReady = true
-          notify()
-        }
+        markReady()
         if (first) {
-          for (const entry of entries) {
-            const want = !hiddenPanels.includes(entry.id)
-            if (entry.pinned !== want) onPinnedChange(entry.id, want)
+          // Whoever applies first owns the layout; the other path only mirrors.
+          if (!layoutApplied) {
+            for (const entry of entries) {
+              if (typeof entry.id !== 'string' || entry.id === FIXED_PANEL_ID) continue
+              applied.add(entry.id)
+              const want = !hiddenPanels.includes(entry.id)
+              if (entry.pinned !== want) onPinnedChange(entry.id, want)
+            }
+            layoutApplied = true
           }
           return
         }
@@ -484,6 +531,8 @@ window.__ModuleLoader__.load({
         notice: noticeSource,
         bridgeReady: bridgeSource,
         adoptBridge,
+        adoptEarly,
+        applyLayout,
         /** @returns the new row id, so the page can reveal and highlight it. */
         add: (draft) => {
           const created = 'item-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7)
@@ -508,7 +557,8 @@ window.__ModuleLoader__.load({
             ? hiddenPanels.filter(candidate => candidate !== id)
             : (hiddenPanels.includes(id) ? hiddenPanels : [...hiddenPanels, id])
           commit(items, next)
-          if (bridge !== null) bridge(id, visible)
+          const setPinned = pinSetter()
+          if (typeof setPinned === 'function') setPinned(id, visible)
         },
         /**
          * Drop one entry onto another, the way the More menu's drag gesture
@@ -550,7 +600,8 @@ window.__ModuleLoader__.load({
           const restore = hiddenPanels
           commit(makeDefaults(), [])
           // Re-pin what the reset just made visible, so the sidebar matches.
-          if (bridge !== null) for (const id of restore) bridge(id, true)
+          const setPinned = pinSetter()
+          if (typeof setPinned === 'function') for (const id of restore) setPinned(id, true)
         },
         /** Report why an entry did nothing; the overlay toast shows it. */
         setNotice: (name) => {
@@ -563,6 +614,37 @@ window.__ModuleLoader__.load({
           notify()
         },
       }
+    }
+
+    /**
+     * Read the host sidebar's pin setter.
+     *
+     * `apply()` of the sidebar package builds its injected props — including
+     * `setPinned` — from a factory stored on its `sidebar` slot registration.
+     * Calling that factory is the only way to reach the setter before the More
+     * menu mounts. Everything about it is treated as optional: an absent or
+     * reshaped registration simply returns undefined and the plugin falls back
+     * to the More-menu bridge.
+     * @param ctx - client root context.
+     * @returns the host's pin setter, or undefined.
+     */
+    function readSidebarPinSetter(ctx) {
+      const entries = typeof ctx.slots.entriesOfSlot === 'function'
+        ? ctx.slots.entriesOfSlot('sidebar')
+        : []
+      for (const entry of Array.isArray(entries) ? entries : []) {
+        const factory = entry?.options?.inject
+        if (typeof factory !== 'function') continue
+        let injected
+        try {
+          injected = factory()
+        } catch {
+          continue
+        }
+        const setPinned = injected?.setPinned
+        if (typeof setPinned === 'function') return setPinned
+      }
+      return undefined
     }
 
     /** Resolve a registered panel label without depending on the slots package. */
@@ -1162,6 +1244,8 @@ window.__ModuleLoader__.load({
           reset: store.reset,
         },
         adoptBridge: store.adoptBridge,
+        adoptEarly: store.adoptEarly,
+        applyLayout: store.applyLayout,
         clearNotice: store.clearNotice,
         runMenuItem: (item) => {
           const ran = runItem(ctx, item)
@@ -1171,6 +1255,35 @@ window.__ModuleLoader__.load({
       })
 
       ctx.effect(installStyles, 'dsh-plugin-sidebar-menu: styles')
+
+      // Apply the saved layout as soon as the sidebar exists. The host hands
+      // its pin setter to the More menu only when that menu mounts, so without
+      // this the layout waited for a click after every restart. The sidebar's
+      // own registration closes over the same setter; reading it here is
+      // guarded, and the More-menu path stays the fallback.
+      ctx.slots.inject('sidebar', () => {
+        const sync = () => {
+          try {
+            // Once the More menu has reported in it owns the live state; the
+            // early setter is only needed until then.
+            if (!store.bridgeReady.getSnapshot()) {
+              const setter = readSidebarPinSetter(ctx)
+              if (setter !== undefined) store.adoptEarly(setter)
+            }
+            store.applyLayout(panels.getSnapshot().panels.map(panel => panel.id))
+          } catch (error) {
+            console.warn('[sidebar-menu] could not apply the saved layout at startup', error)
+          }
+        }
+        sync()
+        let offPanels
+        try {
+          offPanels = panels.subscribe(sync)
+        } catch (error) {
+          console.warn('[sidebar-menu] could not watch the panel list', error)
+        }
+        return () => { if (typeof offPanels === 'function') offPanels() }
+      })
 
       // Settings is the management surface: no sidebar row, no main panel.
       // Order 25 sits after Models (10), Plugins (15), and Agent presets (20),

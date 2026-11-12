@@ -9,4 +9,4 @@ lives in **Settings**, the shortcuts themselves run from the sidebar.
 - Entries are stored in the browser profile and restored after a restart.
 - An entry whose target cannot run reports it in a short toast instead of failing silently.
 
-Panel placement is host-owned and page-session-scoped: DSH resets it on reload, so the plugin re-applies your saved choice once the sidebar's More menu mounts (the first time you open it). Until then the sidebar lists every panel. Shortcut entries and panel choices both survive a restart.
+Panel placement is host-owned and page-session-scoped: DSH resets it on reload, so the plugin re-applies your saved choice as soon as the sidebar exists — no click needed. If a future DSH build stops exposing that hook, the plugin falls back to applying the layout the first time the sidebar's More menu opens, and Settings says so.
